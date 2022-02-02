@@ -1,0 +1,390 @@
+---
+title: "Real Gross Domestic Product by Industry"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    css: css/css-default.css
+    logo: img/us-flag.jpg
+runtime: shiny 
+
+---
+
+```{r setup, include=FALSE}
+
+# 1.0 Libraries ----
+
+# App
+library(flexdashboard)
+library(shiny)
+library(shinyjs)
+library(shinyWidgets)
+
+# Core
+library(tidyverse)
+library(tidyquant)
+library(fs)
+
+# Visualizations
+library(plotly)
+# 
+# # Modeling
+# library(parsnip)
+# library(xgboost)
+
+source("00_functions/all_functions.R")
+
+```
+
+```{r}
+gdp_industry_wrangled_tbl <- read_rds("00_data/gdp_industry_wrangled.rds")
+gdp_industry_majorcateg_tbl <- read_rds("00_data/gdp_industry_majorcateg_tbl.rds")
+metrics_data <- read_rds(file = "00_data/metrics_data.rds") 
+```
+
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+```{r}
+useShinyjs(rmd = TRUE)
+
+dateRangeInput(
+  inputId = "date_range", 
+  label   = h4("Date Range"),
+  start   = min(gdp_industry_wrangled_tbl$gdp_date), 
+  end     = max(gdp_industry_wrangled_tbl$gdp_date), 
+  min     = min(gdp_industry_wrangled_tbl$gdp_date), 
+  max     = max(gdp_industry_wrangled_tbl$gdp_date), 
+  startview = "month"
+  )
+
+
+shinyWidgets::pickerInput(
+    inputId  = "industry_picker",
+    label    = h4("Industry"),
+    choices  = unique(gdp_industry_wrangled_tbl$industry) %>% sort(decreasing = TRUE),
+    selected = "National GDP",
+    multiple = FALSE,
+    options  = list(
+        `actions-box` = TRUE,
+        size = 10,
+        `selected-text-format` = "count > 3"
+        
+    )
+)
+
+br()
+hr()
+
+div(
+  style = "display: flex;",
+  
+  shinyWidgets::pickerInput(
+    inputId  = "year_picker",
+    label    = h4("Year"),
+    choices  = unique(metrics_data$year) %>% sort(decreasing = TRUE),
+    selected = max(metrics_data$year),
+    multiple = FALSE,
+    options  = list(
+      `actions-box` = TRUE,
+      size = 10,
+      `selected-text-format` = "count > 3"
+    )
+  ),
+  
+  shinyWidgets::pickerInput(
+      inputId = "quarter_picker",
+      label = h4("Quarter"),
+      choices = c("Q4" = 4, "Q3" = 3, "Q2" = 2, "Q1" = 1) %>% sort(),
+      selected = "1",
+      multiple = FALSE
+      
+  )
+)
+
+
+br()
+hr()
+br()
+
+actionButton(inputId = "apply", label = "Apply", icon = icon("play"))
+
+actionButton(inputId = "reset", label = "Reset", icon = icon("sync"))
+
+observeEvent(eventExpr = input$reset, handlerExpr = {
+  updatePickerInput(
+    session = session,
+    inputId = "industry_picker",
+    selected = "National GDP"
+  )
+  
+  updateDateRangeInput(
+    session = session,
+    inputId = "date_range",
+    start = min(gdp_industry_wrangled_tbl$gdp_date),
+    end = max(gdp_industry_wrangled_tbl$gdp_date)
+  )
+  
+  updatePickerInput(
+    session = session,
+    inputId = "year_picker",
+    selected = max(metrics_data$year)
+  )
+  
+  updatePickerInput(session = session,
+                    inputId = "quarter_picker",
+                    selected = "1")
+  
+  shinyjs::delay(ms = 300, expr = {
+    shinyjs::click(id = "apply")
+  })
+  
+})
+
+```
+
+
+
+```{r}
+
+filtered_data1 <- eventReactive(
+  eventExpr = input$apply,
+  
+  valueExpr = { 
+    
+    time_picker_gdp(gdp_industry_wrangled_tbl, time_unit = "quarter") %>%
+      filter(format_date %>% between(left  = input$date_range[1],
+                                     right = input$date_range[2])) %>% 
+      filter(industry %in% input$industry_picker)  
+ }, 
+ 
+ ignoreNULL = FALSE
+ )
+
+```
+
+
+```{r}
+
+filtered_metrics_tbl <- eventReactive(
+  eventExpr = input$apply,
+
+  valueExpr = {
+
+    metrics_data %>%
+    filter(year == input$year_picker & quarter == input$quarter_picker) %>%
+    filter(industry %in% input$industry_picker)
+
+ },
+
+ ignoreNULL = FALSE
+ )
+
+```
+
+
+
+```{r}
+
+rate_tbl <- metrics_data %>%
+    select(industry, gdp, format_date, quarter) %>%
+    group_by(industry) %>%
+    mutate(lag_1 = lag(gdp, n = 1)) %>%
+    mutate(lag_1 = case_when(is.na(lag_1) ~ gdp,
+                             TRUE ~ lag_1)) %>%
+    summarise(
+        rate = (gdp - lag_1) / lag_1,
+        row                   = row_number(),
+        format_date           = format_date[row],
+        quarter               = quarter[row],
+    ) %>%
+    ungroup() %>%
+    mutate(rate_text = scales::percent(rate, accuracy = 0.1)) %>% 
+    mutate(year = year(format_date))
+
+
+rate_metrics_tbl<- eventReactive(
+  eventExpr = input$apply,
+
+  valueExpr = {
+
+    rate_tbl %>%
+    filter(year == input$year_picker & quarter == input$quarter_picker) %>%
+    filter(industry %in% input$industry_picker)
+
+ },
+
+ ignoreNULL = FALSE
+ )
+
+```
+
+
+
+Metrics {data-height=100}
+-----------------------------------------------------------------------
+
+
+### Industry GDP
+
+```{r}
+
+renderValueBox({
+  
+  valueBox(
+  value = filtered_metrics_tbl() %>% pull(gdp) %>% 
+  scales::number(big.mark = ",", suffix = "M", prefix = "$"),
+  caption = "Industry GDP",
+  icon = "fa-usd",
+  color = "success"
+)
+  
+})
+
+```
+
+
+### Contribution to National GDP
+
+```{r}
+renderValueBox({
+  
+  valueBox(
+  value = filtered_metrics_tbl() %>% 
+  pull(ind_cont_percent),
+  caption = "Contribution to National GDP",
+  icon = "fa-percent",
+  color = "success"
+)
+  
+})
+
+```
+
+
+
+### Rank in National GDP Contribution
+
+```{r}
+
+renderValueBox({
+  
+  valueBox(
+  value = filtered_metrics_tbl() %>% 
+  pull(rank),
+  caption = "Rank in National GDP Contribution",
+  icon = "fa-line-chart",
+  color = "success"
+)
+  
+})
+
+```
+
+
+
+### Quarterly Growth Rate
+
+
+```{r}
+
+renderValueBox({
+  
+  valueBox(
+  value = rate_metrics_tbl() %>% pull(rate_text),
+  caption = "Quarterly Growth Rate",
+  icon = "fa-percent",
+  color = case_when(rate_metrics_tbl() %>% pull(rate_text) < 0 ~ "danger",
+                        TRUE ~ "success"))
+
+})
+
+```
+
+
+
+
+
+
+Row {data-height=650}
+-----------------------------------------------------------------------
+
+### Industry GDP Time Series 
+
+```{r}
+
+output$plotly_1 <- renderPlotly(expr = {
+  
+  g <- filtered_data1() %>%
+    
+    ggplot(aes(x = format_date, y = gdp)) +
+    geom_line(color     = "#2c3e50") +
+    geom_point(aes(text = ind_cont_perc_text),
+               color    = "#2c3e50",
+               size     = 0.01) +
+    geom_smooth(method  = "loess", span = 0.2) +
+    
+    theme_tq() +
+    expand_limits(y = 0) +
+    scale_y_log10(labels = scales::dollar_format()) +
+        labs(x = "", 
+             y = "GDP (Log-Scale) Million") 
+    
+  
+  ggplotly(g, tooltip = "text") %>%
+    layout(margin = list(b = 100))
+})
+
+plotlyOutput(outputId = "plotly_1")
+
+```
+
+### Industry Quarterly GDP Growth Rate
+
+```{r}
+
+output$plotly_2 <- renderPlotly({
+  
+  g2 <- filtered_data1() %>%
+    select(industry, gdp, format_date) %>%
+    group_by(industry) %>%
+    mutate(lag_1 = lag(gdp, n = 1)) %>%
+    mutate(lag_1 = case_when(is.na(lag_1) ~ gdp,
+                             TRUE ~ lag_1)) %>%
+    summarise(
+      rate = (gdp - lag_1) / lag_1,
+      row                   = row_number(),
+      format_date           = format_date[row],
+      
+    ) %>%
+    ungroup() %>%
+    mutate(rate_text = scales::percent(rate, accuracy = 0.1)) %>%
+    mutate(ind_cont_perc_text = str_glue("Industry : {industry}
+                                          Growth Rate : {rate_text}")) %>%
+    mutate(pos = rate >= 0) %>%
+    
+    ggplot(aes(x = format_date, y = rate, fill = pos)) +
+    geom_col() +
+    # geom_line() +
+    geom_point(aes(text = ind_cont_perc_text),
+               color = "#2c3e50",
+               size = 0.01) +
+    # geom_smooth(method = "loess", span = 0.2) +
+    theme_tq() +
+    expand_limits(y = 0) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(x = "",
+         y = "Growth rate")
+  
+  
+  ggplotly(g2, tooltip = "text") %>%
+    layout(margin = list(b = 100))
+  
+})
+
+plotlyOutput(outputId = "plotly_2")
+
+```
+
+
+
